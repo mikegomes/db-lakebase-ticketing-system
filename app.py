@@ -5,6 +5,7 @@ import streamlit as st
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import GenerateDatabaseCredentialsRequest
 from datetime import datetime
 
 # Initialize Databricks client
@@ -25,6 +26,24 @@ if 'conn' not in st.session_state:
     st.session_state.conn = None
     st.session_state.last_token_refresh = 0
 
+def get_db_credential():
+    """Generate database credential using Databricks SDK"""
+    try:
+        # Try using the dbsql API
+        cred = w.dbsql.generate_database_credential(
+            GenerateDatabaseCredentialsRequest(
+                request_id=str(uuid.uuid4()),
+                instance_names=[PGDATABASE]
+            )
+        )
+        return cred.token
+    except Exception as e:
+        st.error(f"Failed to generate database credential: {e}")
+        # Fallback: check if password is in environment
+        if "PGPASSWORD" in os.environ:
+            return os.environ["PGPASSWORD"]
+        raise
+
 def get_db_connection():
     """Get or refresh database connection with token refresh"""
     current_time = time.time()
@@ -35,10 +54,7 @@ def get_db_connection():
             st.session_state.conn.close()
         
         # Generate new credentials
-        cred = w.database.generate_database_credential(
-            request_id=str(uuid.uuid4()),
-            instance_names=[PGDATABASE]
-        )
+        password = get_db_credential()
         
         # Create new connection
         st.session_state.conn = psycopg2.connect(
@@ -46,7 +62,7 @@ def get_db_connection():
             database=PGDATABASE,
             user=PGUSER,
             port=PGPORT,
-            password=cred.token,
+            password=password,
             sslmode="require"
         )
         st.session_state.last_token_refresh = current_time
