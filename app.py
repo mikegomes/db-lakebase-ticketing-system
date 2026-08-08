@@ -18,7 +18,7 @@ PGPORT = os.environ.get("PGPORT", 5432)
 CLIENT_ID = os.environ["DATABRICKS_CLIENT_ID"]
 
 # Schema name for this app
-SCHEMA_NAME = f"ticketing_schema_{CLIENT_ID}"
+SCHEMA_NAME = "public"
 
 # Global connection state
 if 'conn' not in st.session_state:
