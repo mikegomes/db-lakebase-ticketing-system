@@ -6,3 +6,9 @@ command:
   - "false"
   - --server.enableXsrfProtection
   - "false"
+
+env:
+  - name: ENDPOINT_NAME
+    value: 'projects/ticketing-system/branches/production/endpoints/primary'
+
+    
