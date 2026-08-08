@@ -1,15 +1,8 @@
 import os
-import uuid
 import time
 import streamlit as st
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.sql import GenerateDatabaseCredentialsRequest
-from datetime import datetime
-
-# Initialize Databricks client
-w = WorkspaceClient()
 
 # Database connection parameters from environment
 PGHOST = os.environ["PGHOST"]
@@ -26,46 +19,47 @@ if 'conn' not in st.session_state:
     st.session_state.conn = None
     st.session_state.last_token_refresh = 0
 
-def get_db_credential():
-    """Generate database credential using Databricks SDK"""
-    try:
-        # Try using the dbsql API
-        cred = w.dbsql.generate_database_credential(
-            GenerateDatabaseCredentialsRequest(
-                request_id=str(uuid.uuid4()),
-                instance_names=[PGDATABASE]
-            )
-        )
-        return cred.token
-    except Exception as e:
-        st.error(f"Failed to generate database credential: {e}")
-        # Fallback: check if password is in environment
-        if "PGPASSWORD" in os.environ:
-            return os.environ["PGPASSWORD"]
-        raise
-
 def get_db_connection():
-    """Get or refresh database connection with token refresh"""
-    current_time = time.time()
-    
-    # Refresh token every 15 minutes (900 seconds)
-    if st.session_state.conn is None or (current_time - st.session_state.last_token_refresh) > 900:
-        if st.session_state.conn:
-            st.session_state.conn.close()
-        
-        # Generate new credentials
-        password = get_db_credential()
-        
-        # Create new connection
-        st.session_state.conn = psycopg2.connect(
-            host=PGHOST,
-            database=PGDATABASE,
-            user=PGUSER,
-            port=PGPORT,
-            password=password,
-            sslmode="require"
-        )
-        st.session_state.last_token_refresh = current_time
+    """Get or refresh database connection"""
+    # When Lakebase is configured as an app resource,
+    # connection details are automatically provided via environment variables
+    if st.session_state.conn is None:
+        try:
+            # Try connecting with environment variables
+            # The password may be provided via PGPASSWORD or we might need OAuth
+            conn_params = {
+                "host": PGHOST,
+                "database": PGDATABASE,
+                "user": PGUSER,
+                "port": PGPORT,
+                "sslmode": "require"
+            }
+            
+            # Check if password is in environment
+            if "PGPASSWORD" in os.environ:
+                conn_params["password"] = os.environ["PGPASSWORD"]
+            else:
+                # Try OAuth M2M authentication with workspace client
+                try:
+                    from databricks.sdk.core import oauth_service_principal
+                    
+                    # Get OAuth token for database access
+                    token = oauth_service_principal(
+                        host=os.environ.get("DATABRICKS_HOST"),
+                        client_id=CLIENT_ID,
+                        client_secret=os.environ.get("DATABRICKS_CLIENT_SECRET", "")
+                    )
+                    conn_params["password"] = token
+                except Exception as e:
+                    st.error(f"Authentication failed: {e}")
+                    st.info("Make sure the Lakebase resource is properly configured on the app.")
+                    raise
+            
+            st.session_state.conn = psycopg2.connect(**conn_params)
+            st.session_state.last_token_refresh = time.time()
+        except Exception as e:
+            st.error(f"Database connection failed: {e}")
+            raise
     
     return st.session_state.conn
 
