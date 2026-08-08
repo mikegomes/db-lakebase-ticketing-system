@@ -1,158 +1,244 @@
 import os
+import uuid
+import time
 import streamlit as st
-import psycopg
-from psycopg_pool import ConnectionPool
+import psycopg2
+from psycopg2.extras import RealDictCursor
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.sql import GenerateDatabaseCredentialsRequest
+from datetime import datetime
+
+# Initialize Databricks client
+w = WorkspaceClient()
+
+# Database connection parameters from environment
+PGHOST = os.environ["PGHOST"]
+PGDATABASE = os.environ["PGDATABASE"]
+PGUSER = os.environ["PGUSER"]
+PGPORT = os.environ.get("PGPORT", 5432)
+CLIENT_ID = os.environ["DATABRICKS_CLIENT_ID"]
 
 # Schema name for this app
 SCHEMA_NAME = "public"
 
-@st.cache_resource
-def get_pool():
-    """Create and cache a connection pool with OAuth authentication"""
-    w = WorkspaceClient()
+# Global connection state
+if 'conn' not in st.session_state:
+    st.session_state.conn = None
+    st.session_state.last_token_refresh = 0
 
-    class OAuthConnection(psycopg.Connection):
-        @classmethod
-        def connect(cls, conninfo='', **kwargs):
-            endpoint_name = os.environ.get("ENDPOINT_NAME", os.environ.get("PGDATABASE", ""))
-            try:
-                credential = w.postgres.generate_database_credential(endpoint=endpoint_name)
-                kwargs["password"] = credential.token
-            except Exception as e:
-                st.error(f"Failed to generate database credential: {e}")
-                raise
-            return super().connect(conninfo, **kwargs)
+def get_db_credential():
+    """Generate database credential using Databricks SDK"""
+    try:
+        # Try using the dbsql API
+        cred = w.dbsql.generate_database_credential(
+            GenerateDatabaseCredentialsRequest(
+                request_id=str(uuid.uuid4()),
+                instance_names=[PGDATABASE]
+            )
+        )
+        return cred.token
+    except Exception as e:
+        st.error(f"Failed to generate database credential: {e}")
+        # Fallback: check if password is in environment
+        if "PGPASSWORD" in os.environ:
+            return os.environ["PGPASSWORD"]
+        raise
 
-    conninfo = (
-        f"dbname={os.environ['PGDATABASE']} "
-        f"user={os.environ['PGUSER']} "
-        f"host={os.environ['PGHOST']} "
-        f"port={os.environ.get('PGPORT', '5432')} "
-        f"sslmode={os.environ.get('PGSSLMODE', 'require')}"
-    )
-
-    return ConnectionPool(
-        conninfo=conninfo,
-        connection_class=OAuthConnection,
-        min_size=1,
-        max_size=10,
-        open=True,
-    )
-
-pool = get_pool()
+def get_db_connection():
+    """Get or refresh database connection with token refresh"""
+    current_time = time.time()
+    
+    # Refresh token every 15 minutes (900 seconds)
+    if st.session_state.conn is None or (current_time - st.session_state.last_token_refresh) > 900:
+        if st.session_state.conn:
+            st.session_state.conn.close()
+        
+        # Generate new credentials
+        password = get_db_credential()
+        
+        # Create new connection
+        st.session_state.conn = psycopg2.connect(
+            host=PGHOST,
+            database=PGDATABASE,
+            user=PGUSER,
+            port=PGPORT,
+            password=password,
+            sslmode="require"
+        )
+        st.session_state.last_token_refresh = current_time
+    
+    return st.session_state.conn
 
 def init_database():
     """Initialize database schema and tables"""
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            try:
-                # Create schema if not exists
-                cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}")
-                
-                # Create tickets table
-                cur.execute(f"""
-                    CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.tickets (
-                        ticket_id SERIAL PRIMARY KEY,
-                        title VARCHAR(255) NOT NULL,
-                        status VARCHAR(50) DEFAULT 'open',
-                        created_by VARCHAR(255) NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                
-                # Create ticket_messages table
-                cur.execute(f"""
-                    CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.ticket_messages (
-                        message_id SERIAL PRIMARY KEY,
-                        ticket_id INTEGER REFERENCES {SCHEMA_NAME}.tickets(ticket_id),
-                        message_text TEXT NOT NULL,
-                        author VARCHAR(255) NOT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    )
-                """)
-                
-                conn.commit()
-            except Exception as e:
-                conn.rollback()
-                st.error(f"Database initialization error: {e}")
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # Create schema if not exists
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}")
+        
+        # Create tickets table
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.tickets (
+                ticket_id SERIAL PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                status VARCHAR(50) DEFAULT 'open',
+                created_by VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create ticket_messages table
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.ticket_messages (
+                message_id SERIAL PRIMARY KEY,
+                ticket_id INTEGER REFERENCES {SCHEMA_NAME}.tickets(ticket_id),
+                message_text TEXT NOT NULL,
+                author VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Database initialization error: {e}")
+    finally:
+        cur.close()
 
 def get_all_tickets():
     """Fetch all tickets from the database"""
-    with pool.connection() as conn:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(f"""
-                SELECT ticket_id, title, status, created_by, created_at
-                FROM {SCHEMA_NAME}.tickets
-                ORDER BY created_at DESC
-            """)
-            return cur.fetchall()
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    try:
+        cur.execute(f"""
+            SELECT ticket_id, title, status, created_by, created_at
+            FROM {SCHEMA_NAME}.tickets
+            ORDER BY created_at DESC
+        """)
+        return cur.fetchall()
+    finally:
+        cur.close()
 
 def get_ticket_messages(ticket_id):
     """Fetch all messages for a specific ticket"""
-    with pool.connection() as conn:
-        with conn.cursor(row_factory=psycopg.rows.dict_row) as cur:
-            cur.execute(f"""
-                SELECT message_id, message_text, author, created_at
-                FROM {SCHEMA_NAME}.ticket_messages
-                WHERE ticket_id = %s
-                ORDER BY created_at ASC
-            """, (ticket_id,))
-            return cur.fetchall()
+    conn = get_db_connection()
+    cur = conn.cursor(cursor_factory=RealDictCursor)
+    
+    try:
+        cur.execute(f"""
+            SELECT message_id, message_text, author, created_at
+            FROM {SCHEMA_NAME}.ticket_messages
+            WHERE ticket_id = %s
+            ORDER BY created_at ASC
+        """, (ticket_id,))
+        return cur.fetchall()
+    finally:
+        cur.close()
 
 def create_ticket(title, created_by):
     """Create a new ticket"""
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            try:
-                cur.execute(f"""
-                    INSERT INTO {SCHEMA_NAME}.tickets (title, created_by)
-                    VALUES (%s, %s)
-                    RETURNING ticket_id
-                """, (title, created_by))
-                ticket_id = cur.fetchone()[0]
-                conn.commit()
-                return ticket_id
-            except Exception as e:
-                conn.rollback()
-                st.error(f"Error creating ticket: {e}")
-                return None
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute(f"""
+            INSERT INTO {SCHEMA_NAME}.tickets (title, created_by)
+            VALUES (%s, %s)
+            RETURNING ticket_id
+        """, (title, created_by))
+        ticket_id = cur.fetchone()[0]
+        conn.commit()
+        return ticket_id
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Error creating ticket: {e}")
+        return None
+    finally:
+        cur.close()
 
 def add_message(ticket_id, message_text, author):
     """Add a message to a ticket"""
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            try:
-                cur.execute(f"""
-                    INSERT INTO {SCHEMA_NAME}.ticket_messages (ticket_id, message_text, author)
-                    VALUES (%s, %s, %s)
-                """, (ticket_id, message_text, author))
-                conn.commit()
-                return True
-            except Exception as e:
-                conn.rollback()
-                st.error(f"Error adding message: {e}")
-                return False
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute(f"""
+            INSERT INTO {SCHEMA_NAME}.ticket_messages (ticket_id, message_text, author)
+            VALUES (%s, %s, %s)
+        """, (ticket_id, message_text, author))
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Error adding message: {e}")
+        return False
+    finally:
+        cur.close()
 
 def update_ticket_status(ticket_id, new_status):
     """Update ticket status"""
-    with pool.connection() as conn:
-        with conn.cursor() as cur:
-            try:
-                cur.execute(f"""
-                    UPDATE {SCHEMA_NAME}.tickets
-                    SET status = %s
-                    WHERE ticket_id = %s
-                """, (new_status, ticket_id))
-                conn.commit()
-                return True
-            except Exception as e:
-                conn.rollback()
-                st.error(f"Error updating status: {e}")
-                return False
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        cur.execute(f"""
+            UPDATE {SCHEMA_NAME}.tickets
+            SET status = %s
+            WHERE ticket_id = %s
+        """, (new_status, ticket_id))
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Error updating status: {e}")
+        return False
+    finally:
+        cur.close()
+
+@st.cache_resource
+def init_database_cached():
+    """Initialize database schema and tables (cached)"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # Create schema if not exists
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}")
+        
+        # Create tickets table
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.tickets (
+                ticket_id SERIAL PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                status VARCHAR(50) DEFAULT 'open',
+                created_by VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create ticket_messages table
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.ticket_messages (
+                message_id SERIAL PRIMARY KEY,
+                ticket_id INTEGER REFERENCES {SCHEMA_NAME}.tickets(ticket_id),
+                message_text TEXT NOT NULL,
+                author VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Database initialization error: {e}")
+    finally:
+        cur.close()
 
 # Initialize database
-init_database()
+init_database_cached()
 
 # Page config
 st.set_page_config(page_title="Ticketing System", page_icon="🎫", layout="wide")
