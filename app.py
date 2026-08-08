@@ -110,10 +110,10 @@ def create_ticket(title, created_by):
         with conn.cursor() as cur:
             try:
                 cur.execute(f"""
-                    INSERT INTO {SCHEMA_NAME}.tickets (title, created_by)
-                    VALUES (%s, %s)
+                    INSERT INTO {SCHEMA_NAME}.tickets (title, created_by, status)
+                    VALUES (%s, %s, %s)
                     RETURNING ticket_id
-                """, (title, created_by))
+                """, (title, created_by, 'open'))
                 ticket_id = cur.fetchone()[0]
                 conn.commit()
                 return ticket_id
