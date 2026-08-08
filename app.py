@@ -215,7 +215,7 @@ if 'selected_ticket' in st.session_state and st.session_state.selected_ticket:
             new_status = st.selectbox(
                 "Status",
                 ["open", "in_progress", "closed"],
-                index=["open", "in_progress", "closed"].index(ticket['status']),
+                index=["open", "in_progress", "closed"].index(ticket['status'] or "open"),
                 key=f"status_{ticket_id}"
             )
             if new_status != ticket['status']:
