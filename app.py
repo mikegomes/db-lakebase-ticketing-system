@@ -2,6 +2,7 @@ import os
 import streamlit as st
 import psycopg
 from psycopg_pool import ConnectionPool
+from databricks.sdk import WorkspaceClient
 
 # Schema name for this app
 SCHEMA_NAME = "public"
@@ -9,13 +10,28 @@ SCHEMA_NAME = "public"
 @st.cache_resource
 def get_pool():
     """Create and cache a connection pool using injected credentials"""
+    # For Apps with Lakebase resources, credentials are prefixed with the resource name
+    # The resource is named "database", so check for DATABASE_* variables
+    password = os.environ.get('DATABASE_PGPASSWORD') or os.environ.get('PGPASSWORD')
+    user = os.environ.get('DATABASE_PGUSER') or os.environ.get('PGUSER')
+    host = os.environ.get('DATABASE_PGHOST') or os.environ.get('PGHOST')
+    database = os.environ.get('DATABASE_PGDATABASE') or os.environ.get('PGDATABASE')
+    port = os.environ.get('DATABASE_PGPORT') or os.environ.get('PGPORT', '5432')
+    sslmode = os.environ.get('DATABASE_PGSSLMODE') or os.environ.get('PGSSLMODE', 'require')
+    
+    if not password:
+        # Debug: show what env vars are available
+        available_vars = [k for k in os.environ.keys() if 'PG' in k or 'DATABASE' in k]
+        st.error(f"No password found. Available env vars: {available_vars}")
+        raise ValueError("No database password available in environment")
+    
     conninfo = (
-        f"dbname={os.environ['PGDATABASE']} "
-        f"user={os.environ['PGUSER']} "
-        f"password={os.environ['PGPASSWORD']} "
-        f"host={os.environ['PGHOST']} "
-        f"port={os.environ.get('PGPORT', '5432')} "
-        f"sslmode={os.environ.get('PGSSLMODE', 'require')}"
+        f"dbname={database} "
+        f"user={user} "
+        f"password={password} "
+        f"host={host} "
+        f"port={port} "
+        f"sslmode={sslmode}"
     )
 
     return ConnectionPool(
@@ -138,47 +154,8 @@ def update_ticket_status(ticket_id, new_status):
                 st.error(f"Error updating status: {e}")
                 return False
 
-@st.cache_resource
-def init_database_cached():
-    """Initialize database schema and tables (cached)"""
-    conn = get_db_connection()
-    cur = conn.cursor()
-    
-    try:
-        # Create schema if not exists
-        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}")
-        
-        # Create tickets table
-        cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.tickets (
-                ticket_id SERIAL PRIMARY KEY,
-                title VARCHAR(255) NOT NULL,
-                status VARCHAR(50) DEFAULT 'open',
-                created_by VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Create ticket_messages table
-        cur.execute(f"""
-            CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.ticket_messages (
-                message_id SERIAL PRIMARY KEY,
-                ticket_id INTEGER REFERENCES {SCHEMA_NAME}.tickets(ticket_id),
-                message_text TEXT NOT NULL,
-                author VARCHAR(255) NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        st.error(f"Database initialization error: {e}")
-    finally:
-        cur.close()
-
 # Initialize database
-init_database_cached()
+init_database()
 
 # Page config
 st.set_page_config(page_title="Ticketing System", page_icon="🎫", layout="wide")
