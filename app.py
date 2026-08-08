@@ -25,40 +25,51 @@ def get_db_connection():
     # connection details are automatically provided via environment variables
     if st.session_state.conn is None:
         try:
-            # Try connecting with environment variables
-            # The password may be provided via PGPASSWORD or we might need OAuth
-            conn_params = {
-                "host": PGHOST,
-                "database": PGDATABASE,
-                "user": PGUSER,
-                "port": PGPORT,
-                "sslmode": "require"
+            import requests
+            import json
+            
+            # Get OAuth token using Databricks REST API
+            workspace_url = os.environ.get("DATABRICKS_HOST", "")
+            api_token = os.environ.get("DATABRICKS_TOKEN", "")
+            
+            # Generate database credential
+            headers = {
+                "Authorization": f"Bearer {api_token}",
+                "Content-Type": "application/json"
             }
             
-            # Check if password is in environment
-            if "PGPASSWORD" in os.environ:
-                conn_params["password"] = os.environ["PGPASSWORD"]
-            else:
-                # Try OAuth M2M authentication with workspace client
-                try:
-                    from databricks.sdk.core import oauth_service_principal
-                    
-                    # Get OAuth token for database access
-                    token = oauth_service_principal(
-                        host=os.environ.get("DATABRICKS_HOST"),
-                        client_id=CLIENT_ID,
-                        client_secret=os.environ.get("DATABRICKS_CLIENT_SECRET", "")
-                    )
-                    conn_params["password"] = token
-                except Exception as e:
-                    st.error(f"Authentication failed: {e}")
-                    st.info("Make sure the Lakebase resource is properly configured on the app.")
-                    raise
+            # Request database credentials from Databricks
+            response = requests.post(
+                f"{workspace_url}/api/2.0/postgres/credentials/generate",
+                headers=headers,
+                json={
+                    "instance_names": [PGDATABASE]
+                }
+            )
             
-            st.session_state.conn = psycopg2.connect(**conn_params)
+            if response.status_code == 200:
+                db_password = response.json()["token"]
+            else:
+                # Fallback to PGPASSWORD if API call fails
+                st.warning(f"API credential generation failed (status {response.status_code}), trying PGPASSWORD")
+                db_password = os.environ.get("PGPASSWORD", "")
+                if not db_password:
+                    raise Exception("No database credentials available. Check Lakebase resource configuration.")
+            
+            # Connect to database
+            st.session_state.conn = psycopg2.connect(
+                host=PGHOST,
+                database=PGDATABASE,
+                user=PGUSER,
+                port=PGPORT,
+                password=db_password,
+                sslmode="require"
+            )
             st.session_state.last_token_refresh = time.time()
+            
         except Exception as e:
             st.error(f"Database connection failed: {e}")
+            st.info("Make sure the Lakebase resource is properly configured on the app.")
             raise
     
     return st.session_state.conn
