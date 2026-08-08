@@ -4,39 +4,44 @@ import psycopg
 from psycopg_pool import ConnectionPool
 from databricks.sdk import WorkspaceClient
 
+# Page config - MUST be first Streamlit command
+st.set_page_config(page_title="Ticketing System", page_icon="🎫", layout="wide")
+
 # Schema name for this app
 SCHEMA_NAME = "public"
 
-# Initialize Databricks client for token generation
-w = WorkspaceClient()
-
-# Custom connection class that generates fresh OAuth tokens
-class OAuthConnection(psycopg.Connection):
-    @classmethod
-    def connect(cls, conninfo='', **kwargs):
-        # Generate a fresh OAuth token for each connection (tokens are workspace-scoped)
-        endpoint_name = os.environ["ENDPOINT_NAME"]
-        credential = w.postgres.generate_database_credential(endpoint=endpoint_name)
-        kwargs['password'] = credential.token
-        return super().connect(conninfo, **kwargs)
-
 @st.cache_resource
 def get_pool():
-    """Create and cache a connection pool with OAuth authentication"""
-    # Configure connection parameters
-    username = os.environ["PGUSER"]
-    host = os.environ["PGHOST"]
-    port = os.environ.get("PGPORT", "5432")
-    database = os.environ["PGDATABASE"]
-    sslmode = os.environ.get("PGSSLMODE", "require")
+    """Create and cache a connection pool using injected credentials"""
+    # For Apps with Lakebase resources, credentials are prefixed with the resource name
+    # The resource is named "database", so check for DATABASE_* variables
+    password = os.environ.get('DATABASE_PGPASSWORD') or os.environ.get('PGPASSWORD')
+    user = os.environ.get('DATABASE_PGUSER') or os.environ.get('PGUSER')
+    host = os.environ.get('DATABASE_PGHOST') or os.environ.get('PGHOST')
+    database = os.environ.get('DATABASE_PGDATABASE') or os.environ.get('PGDATABASE')
+    port = os.environ.get('DATABASE_PGPORT') or os.environ.get('PGPORT', '5432')
+    sslmode = os.environ.get('DATABASE_PGSSLMODE') or os.environ.get('PGSSLMODE', 'require')
     
-    # Create connection pool with automatic token rotation
+    if not password:
+        # Debug: show what env vars are available
+        available_vars = [k for k in os.environ.keys() if 'PG' in k or 'DATABASE' in k]
+        st.error(f"No password found. Available env vars: {available_vars}")
+        raise ValueError("No database password available in environment")
+    
+    conninfo = (
+        f"dbname={database} "
+        f"user={user} "
+        f"password={password} "
+        f"host={host} "
+        f"port={port} "
+        f"sslmode={sslmode}"
+    )
+
     return ConnectionPool(
-        conninfo=f"dbname={database} user={username} host={host} port={port} sslmode={sslmode}",
-        connection_class=OAuthConnection,
+        conninfo=conninfo,
         min_size=1,
         max_size=10,
-        open=True
+        open=True,
     )
 
 pool = get_pool()
@@ -155,8 +160,7 @@ def update_ticket_status(ticket_id, new_status):
 # Initialize database
 init_database()
 
-# Page config
-st.set_page_config(page_title="Ticketing System", page_icon="🎫", layout="wide")
+# Page header
 st.title("🎫 Support Ticketing System")
 st.caption("Powered by Databricks & Lakebase")
 
