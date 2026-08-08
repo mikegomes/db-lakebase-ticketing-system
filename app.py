@@ -30,6 +30,10 @@ def get_db_connection():
             
             # Get OAuth token using Databricks REST API
             workspace_url = os.environ.get("DATABRICKS_HOST", "")
+            # Ensure workspace_url has https:// scheme
+            if workspace_url and not workspace_url.startswith("http"):
+                workspace_url = f"https://{workspace_url}"
+            
             api_token = os.environ.get("DATABRICKS_TOKEN", "")
             
             # Generate database credential
