@@ -2,31 +2,17 @@ import os
 import streamlit as st
 import psycopg
 from psycopg_pool import ConnectionPool
-from databricks.sdk import WorkspaceClient
 
 # Schema name for this app
 SCHEMA_NAME = "public"
 
 @st.cache_resource
 def get_pool():
-    """Create and cache a connection pool with OAuth authentication"""
-    w = WorkspaceClient()
-
-    class OAuthConnection(psycopg.Connection):
-        @classmethod
-        def connect(cls, conninfo='', **kwargs):
-            endpoint_name = os.environ.get("ENDPOINT_NAME", os.environ.get("PGDATABASE", ""))
-            try:
-                credential = w.postgres.generate_database_credential(endpoint=endpoint_name)
-                kwargs["password"] = credential.token
-            except Exception as e:
-                st.error(f"Failed to generate database credential: {e}")
-                raise
-            return super().connect(conninfo, **kwargs)
-
+    """Create and cache a connection pool using injected credentials"""
     conninfo = (
         f"dbname={os.environ['PGDATABASE']} "
         f"user={os.environ['PGUSER']} "
+        f"password={os.environ['PGPASSWORD']} "
         f"host={os.environ['PGHOST']} "
         f"port={os.environ.get('PGPORT', '5432')} "
         f"sslmode={os.environ.get('PGSSLMODE', 'require')}"
@@ -34,7 +20,6 @@ def get_pool():
 
     return ConnectionPool(
         conninfo=conninfo,
-        connection_class=OAuthConnection,
         min_size=1,
         max_size=10,
         open=True,
@@ -153,8 +138,47 @@ def update_ticket_status(ticket_id, new_status):
                 st.error(f"Error updating status: {e}")
                 return False
 
+@st.cache_resource
+def init_database_cached():
+    """Initialize database schema and tables (cached)"""
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    try:
+        # Create schema if not exists
+        cur.execute(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA_NAME}")
+        
+        # Create tickets table
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.tickets (
+                ticket_id SERIAL PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                status VARCHAR(50) DEFAULT 'open',
+                created_by VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        # Create ticket_messages table
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {SCHEMA_NAME}.ticket_messages (
+                message_id SERIAL PRIMARY KEY,
+                ticket_id INTEGER REFERENCES {SCHEMA_NAME}.tickets(ticket_id),
+                message_text TEXT NOT NULL,
+                author VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        st.error(f"Database initialization error: {e}")
+    finally:
+        cur.close()
+
 # Initialize database
-init_database()
+init_database_cached()
 
 # Page config
 st.set_page_config(page_title="Ticketing System", page_icon="🎫", layout="wide")
