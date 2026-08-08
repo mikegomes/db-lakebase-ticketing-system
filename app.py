@@ -110,8 +110,8 @@ def create_ticket(title, created_by):
         with conn.cursor() as cur:
             try:
                 cur.execute(f"""
-                    INSERT INTO {SCHEMA_NAME}.tickets (title, created_by, status)
-                    VALUES (%s, %s, %s)
+                    INSERT INTO {SCHEMA_NAME}.tickets (title, created_by, status, created_at)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
                     RETURNING ticket_id
                 """, (title, created_by, 'open'))
                 ticket_id = cur.fetchone()[0]
@@ -128,8 +128,8 @@ def add_message(ticket_id, message_text, author):
         with conn.cursor() as cur:
             try:
                 cur.execute(f"""
-                    INSERT INTO {SCHEMA_NAME}.ticket_messages (ticket_id, message_text, author)
-                    VALUES (%s, %s, %s)
+                    INSERT INTO {SCHEMA_NAME}.ticket_messages (ticket_id, message_text, author, created_at)
+                    VALUES (%s, %s, %s, CURRENT_TIMESTAMP)
                 """, (ticket_id, message_text, author))
                 conn.commit()
                 return True
